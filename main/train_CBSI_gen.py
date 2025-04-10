@@ -165,7 +165,7 @@ if __name__ == '__main__':
     # -------------------- Data settings
     parser.add_argument('--bs', type=int, default=5, help='batch size')
     parser.add_argument('--test_bs', type=int, default=24, help='batch size')
-    parser.add_argument('--ImageSize', type=int, default=424, help='then crop to this size')  # 对于整图160不如256
+    parser.add_argument('--ImageSize', type=int, default=424, help='then crop to this size')
     parser.add_argument('--MR_max', type=int, default=255, help='MR_max')
     parser.add_argument('--MR_min', type=int, default=0, help='MR_min')
 
