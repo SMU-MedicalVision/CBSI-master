@@ -266,7 +266,7 @@ if __name__ == '__main__':
     parser.add_argument('--sample_name', type=str, default='best_MAE_ddim_100', help='best_MAE_ddim_100 |epoch200_ddim_100')
     parser.add_argument('--num_threads', default=8, type=int, help='# threads for loading data')
     parser.add_argument('--batch_size', type=int, default=64, help='input batch size')
-    parser.add_argument('--ImageSize', type=int, default=424, help='then crop to this size')  # 对于整图160不如256
+    parser.add_argument('--ImageSize', type=int, default=424, help='then crop to this size')  
     parser.add_argument('--seed', type=int, default=42, help='random seed')
     parser.add_argument('--do_flood', type=bool, default=True, help='do flood loss')
     parser.add_argument('--flood', type=float, default=0.1, help='flood loss')
