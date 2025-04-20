@@ -1,0 +1,13 @@
+1. 'pip download torch==2.0.0+cu118 torchvision==0.15.1+cu118' takes a relatively long time.
+    If the installation fails, you can download A and B for manual installation
+
+2. AttributeError: module 'PIL.Image' has no attribute 'ANTIALIAS' python-BaseException
+-This is because in Pillow 10.0.0+, Image.ANTIALIAS was completely removed and the Pillow version (compatible with tensorboardX) should be reduced.
+    'pip install "Pillow<10.0"' or 'pip install Pillow==9.5.0'
+
+3. UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True), rather than torch.tensor(sourceTensor).
+-It's normal to have this warning. You can add the following command to ignore it:
+    '''
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning, message=".*To copy construct from a tensor.*")
+    '''
