@@ -1,12 +1,12 @@
 import math
 import torch
-import functools
-from torch.nn import init
 from torch import nn, einsum
 from functools import partial
 import torch.nn.functional as F
 from einops import rearrange, reduce
 
+# import functools
+# from torch.nn import init
 
 
 def exists(x):
@@ -80,7 +80,6 @@ class PreNorm(nn.Module):
 
 
 # sinusoidal positional embeds
-
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -115,7 +114,6 @@ class LearnedSinusoidalPosEmb(nn.Module):
 
 
 # building block modules
-
 class Block(nn.Module):
     def __init__(self, dim, dim_out, groups=8):
         super().__init__()
@@ -231,6 +229,23 @@ class Attention(nn.Module):
         return self.to_out(out)
 
 
+class FCN(nn.Module):
+    def __init__(self, in_channel=32):
+        super(FCN, self).__init__()
+        self.fcn = nn.Sequential(
+            nn.Conv2d(in_channel, 32, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 1, 1, 1, 0),
+            nn.Sigmoid()
+        )
+    def forward(self, x):
+        return self.fcn(x)
+
+
 class Unet_class(nn.Module):
     def __init__(
             self,
@@ -245,7 +260,9 @@ class Unet_class(nn.Module):
             resnet_block_groups=8,
             learned_variance=False,
             learned_sinusoidal_cond=False,
-            learned_sinusoidal_dim=16
+            learned_sinusoidal_dim=16,
+            seg_head=False,
+            seg_model=False
     ):
         super().__init__()
 
@@ -253,6 +270,8 @@ class Unet_class(nn.Module):
         # determine dimensions
         self.channels = channels
         self.condition = condition
+        self.seg_head = seg_head
+        self.seg_model = seg_model
         input_channels = channels + condition_channels if condition else channels
 
         init_dim = default(init_dim, dim)
@@ -325,15 +344,22 @@ class Unet_class(nn.Module):
         self.final_res_block = block_klass(dim * 2, dim, time_emb_dim=time_dim)
         self.final_conv = nn.Conv2d(dim, self.out_dim, 1)
 
-    def forward(self, x, time, x_self_cond=None, label=None):
+        if self.seg_head:
+            # self.seg_head_conv = nn.Conv2d(dim, self.out_dim, 1)
+            self.seg_head_conv = FCN(in_channel=dim)
+        if self.seg_model:
+            self.seg_model_conv = simple_Unet_for_seg(dim=32, init_dim=None, out_dim=1, dim_mults=(1, 2, 4, 8), channels=1, norm='bn', act=nn.ReLU, activate='none')
+
+    def forward(self, x, time, x_self_cond=None, seg_cond=None, label=None):
         if self.condition:
             x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))
-            x = torch.cat((x_self_cond, x), dim=1)
+            if seg_cond is not None:
+                x = torch.cat((x_self_cond, seg_cond, x), dim=1)
+            else:
+                x = torch.cat((x_self_cond, x), dim=1)
         x = self.init_conv(x)
         r = x.clone()
-
         emb = self.time_mlp(time)
-
         if self.class_cond is not None:
             emb = emb + self.label_emb(label)
 
@@ -347,9 +373,7 @@ class Unet_class(nn.Module):
             x = downsample(x)
         x = self.mid_block1(x, emb)
         x = self.mid_attn(x)
-
         # self.feature = x
-
         x = self.mid_block2(x, emb)
         for block1, block2, attn, upsample in self.ups:
             x = torch.cat((x, h.pop()), dim=1)
@@ -360,7 +384,13 @@ class Unet_class(nn.Module):
             x = upsample(x)
         x = torch.cat((x, r), dim=1)
         x = self.final_res_block(x, emb)
-        return self.final_conv(x)
+        if self.seg_head:
+            return self.final_conv(x), self.seg_head_conv(x)
+        elif self.seg_model:
+            x = self.final_conv(x)
+            return x, self.seg_model_conv(x)
+        else:
+            return self.final_conv(x)
 
 
 
@@ -440,14 +470,6 @@ def init_net(net, init_type='normal', init_gain=0.02, gpu_ids=[]):
 
 
 if __name__ == '__main__':
-    # net = Modified_UNet(dim=32,
-    #         init_dim=None,
-    #         out_dim=None,
-    #         dim_mults=(1, 2, 4, 8),
-    #         channels=1,
-    #         condition_channels=5,
-    #         condition=True,
-    #         resnet_block_groups=8)
     net = Unet_class(dim=32, init_dim=None, out_dim=None, dim_mults=(1, 2, 4, 8), channels=1, condition_channels=2,
                condition=True, class_cond=2, resnet_block_groups=8)
     x = torch.rand(1, 1, 424, 424)

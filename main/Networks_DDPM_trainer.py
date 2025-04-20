@@ -8,7 +8,7 @@ from einops import reduce
 from tqdm.auto import tqdm
 from functools import partial
 from collections import namedtuple
-
+from Lossfunction import DiceLoss
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
 
@@ -65,12 +65,15 @@ class GaussianDiffusion(nn.Module):
             activate='none',
             p2_loss_weight_gamma=0.,
             p2_loss_weight_k=1,
-            ddim_sampling_eta=1.
+            ddim_sampling_eta=1.,
+            seg_weight=1,
     ):
         super().__init__()
         assert not (type(self) == GaussianDiffusion and model.channels != model.out_dim)
         assert not model.learned_sinusoidal_cond
         self.model = model
+        self.multitask = 'seg_head_conv' in str(self.model.__dict__) or 'seg_model_conv' in str(self.model.__dict__)
+        self.seg_weight = seg_weight
         self.channels = self.model.channels
         self.condition = self.model.condition
         self.activate = activate
@@ -118,13 +121,6 @@ class GaussianDiffusion(nn.Module):
         # calculate p2 reweighting
         register_buffer('p2_loss_weight',
                         (p2_loss_weight_k + alphas_cumprod / (1 - alphas_cumprod)) ** -p2_loss_weight_gamma)
-        import matplotlib.pyplot as plt
-        plt.rcParams['figure.figsize'] = (4, 3)
-        plt.plot(betas)
-        plt.plot(torch.sqrt(1. - alphas_cumprod))
-        plt.plot(alphas_cumprod)
-        plt.plot(torch.sqrt(alphas_cumprod))
-        plt.show()
 
     def predict_start_from_noise(self, x_t, t, noise):
         return (
@@ -147,8 +143,11 @@ class GaussianDiffusion(nn.Module):
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def model_predictions(self, x, t, x_cond=None, label=None, clip_x_start=False):
-        model_output = self.model(x, t, x_cond, label)
+    def model_predictions(self, x, t, x_cond=None, seg_cond=None, label=None, clip_x_start=False):
+        if not self.multitask:
+            model_output = self.model(x, t, x_self_cond=x_cond, seg_cond=seg_cond, label=label)
+        else:
+            (model_output, seg_output) = self.model(x, t, x_self_cond=x_cond, seg_cond=seg_cond, label=label)
         if self.activate == 'tanh':
             model_output = torch.tanh(model_output)
         maybe_clip = partial(torch.clamp, min=-1., max=1.) if clip_x_start else identity
@@ -162,12 +161,15 @@ class GaussianDiffusion(nn.Module):
             pred_noise = self.predict_noise_from_start(x, t, x_start)
 
         # return ModelPrediction(pred_noise, x_start), feature
-        return ModelPrediction(pred_noise, x_start)
+        if not self.multitask:
+            return ModelPrediction(pred_noise, x_start)
+        else:
+            return ModelPrediction(pred_noise, x_start), seg_output
 
     def feature(self, x, t, x_cond=None, label=None, clip_x_start=False):
 
         model_output = self.model(x, t, x_cond, label)
-        feature = self.model.feature.detach()
+        # feature = self.model.feature.detach()
 
         if self.activate == 'tanh':
             model_output = torch.tanh(model_output)
@@ -211,7 +213,7 @@ class GaussianDiffusion(nn.Module):
             img, x_start = self.p_sample(img, t, self_cond)
         return img
 
-    def pred_cond(self, cond, label=None):
+    def pred_cond(self, cond, seg_cond=None, label=None):
         device = self.betas.device
         shape = (cond.size(0), self.model.channels, self.image_size, self.image_size)
         img = torch.randn(shape, device=device)
@@ -220,7 +222,7 @@ class GaussianDiffusion(nn.Module):
             img, x_start = self.p_sample(img, t, x_cond, label=label)
         return img
 
-    def pred_cond_fast(self, cond, label=None, sampling_timesteps=250, clip_denoised=True):
+    def pred_cond_fast(self, cond, seg_cond=None, label=None, sampling_timesteps=250, clip_denoised=True):
         device = self.betas.device
         batch = cond.size(0)
         shape = (cond.size(0), self.model.channels, self.image_size, self.image_size)
@@ -231,7 +233,13 @@ class GaussianDiffusion(nn.Module):
 
         for time, time_next in time_pairs:
             time_cond = torch.full((batch,), time, device=device, dtype=torch.long)
-            pred_noise, x_start, *_ = self.model_predictions(img, time_cond, cond, label, clip_x_start=clip_denoised)
+
+            if not self.multitask:
+                pred_noise, x_start, *_ = self.model_predictions(img, time_cond, cond, seg_cond=seg_cond, label=label, clip_x_start=clip_denoised)
+            else:
+                if time < len(self.alphas_cumprod)*0.2 and seg_cond is not None:
+                    seg_cond = seg_output
+                (pred_noise, x_start, *_), seg_output = self.model_predictions(img, time_cond, cond, seg_cond=seg_cond, label=label, clip_x_start=clip_denoised)
             if time_next < 0:
                 img = x_start
                 continue
@@ -243,7 +251,11 @@ class GaussianDiffusion(nn.Module):
             img = x_start * alpha_next.sqrt() + \
                   c * pred_noise + \
                   sigma * noise
-        return img
+        if not self.multitask:
+            return img
+        else:
+            return img, seg_output
+
 
     @torch.no_grad()
     def sample(self, batch_size=16):
@@ -268,14 +280,15 @@ class GaussianDiffusion(nn.Module):
         else:
             raise ValueError(f'invalid loss type {self.loss_type}')
 
-    def p_losses(self, x_start, t, cond=None, label=None, noise=None):
+
+    def p_losses(self, x_start, t, cond=None, seg=None, seg_cond=None, label=None, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         x = self.q_sample(x_start=x_start, t=t, noise=noise)
         x_cond = cond
-        if label is not None:
-            model_out = self.model(x, t, x_cond, label)
+        if seg is None:
+            model_out = self.model(x, t, x_self_cond=x_cond, seg_cond=seg_cond, label=label)
         else:
-            model_out = self.model(x, t, x_cond)
+            (model_out, seg_out) = self.model(x, t, x_self_cond=x_cond, seg_cond=seg_cond, label=label)
         if self.activate == 'tanh':
             model_out = torch.tanh(model_out)
         if self.objective == 'pred_noise':
@@ -287,24 +300,31 @@ class GaussianDiffusion(nn.Module):
         # loss = self.loss_fn(model_out, target, reduction='none')
         if self.loss_type == 'vgg':
             loss = self.loss_fn(model_out, target)
-            return loss
-        if self.loss_type == 'mix':
+        elif self.loss_type == 'mix':
             loss_l1 = self.loss_fn[0](model_out, target, reduction='none')
             loss_l1 = reduce(loss_l1, 'b ... -> b (...)', 'mean')
             loss_l1 = loss_l1 * extract(self.p2_loss_weight, t, loss_l1.shape)
-            loss_vgg = self.loss_fn[1](model_out, target)
-            return loss_l1.mean() + loss_vgg * 0.1
+            loss_vgg = self.loss_fn[1](model_out, target) # for pred_noise, Convert to x0 and then compute?
+            loss = loss_l1.mean() + loss_vgg * self.vgg_weight
         else:
             loss = self.loss_fn(model_out, target, reduction='none')
             loss = reduce(loss, 'b ... -> b (...)', 'mean')
             loss = loss * extract(self.p2_loss_weight, t, loss.shape)
-            return loss.mean()
+            loss = loss.mean()
 
-    def forward(self, img, cond, label=None, *args, **kwargs):
+        if seg is not None:
+            # res_map = CE_mask(target, model_out)  # CE_mask 还没改好
+            # loss_seg = self.loss_fn(seg_out, res_map, reduction='mean')  # 当前项计算的target mask
+            lossfunction_seg = DiceLoss()
+            loss_seg = lossfunction_seg(seg_out, seg)
+            loss = loss + loss_seg * self.seg_weight
+        return loss
+
+    def forward(self, img, cond, seg=None, seg_cond=None, label=None, *args, **kwargs):
         b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size
         assert h == img_size and w == img_size, f'height and width of image must be {img_size} not {h}&{w}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-        return self.p_losses(img, t, cond=cond, label=label, *args, **kwargs)
+        return self.p_losses(img, t, cond=cond, seg=seg, seg_cond=seg_cond, label=label, *args, **kwargs)
 
 
 class DDPM_Trainer(object):
@@ -317,24 +337,40 @@ class DDPM_Trainer(object):
     ):
         super().__init__()
         self.model = diffusion_model
+        self.multitask = self.model.multitask
         self.batch_size = train_batch_size
         self.image_size = diffusion_model.image_size
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr, betas=adam_betas)
 
     def calculate_loss(self, x, x_cond, label=None):
-        if label is not None:
-            loss = self.model(x, x_cond, label)
-        else:
-            loss = self.model(x, x_cond)
+        loss = self.model(x, x_cond, label=label)
         return loss
 
-    def pred(self, x_cond, T, label=None, ddim=False):
-        if T == self.model.num_timesteps and not ddim:
-            pred_img = self.model.pred_cond(x_cond, label=label)
-        elif T < self.model.num_timesteps or ddim:
-            # pred_img = self.model.pred_cond_fast(x_cond, sampling_timesteps=T)
-            pred_img = self.model.pred_cond_fast(x_cond, label=label, sampling_timesteps=T)
-        return pred_img
+    def calculate_loss_multitask(self, x, x_cond, seg, seg_cond, label=None):
+        loss = self.model(x, x_cond, seg, seg_cond, label=label)
+        return loss
+
+
+    def pred(self, x_cond, T, seg_cond=None, label=None, sample_type='ddim'):
+        if not self.multitask:
+            if T == self.model.num_timesteps and sample_type.lower() == 'ddpm':
+                pred_img = self.model.pred_cond(x_cond, seg_cond=seg_cond, label=label)
+            elif T < self.model.num_timesteps or sample_type.lower() == 'ddim':
+                # pred_img = self.model.pred_cond_fast(x_cond, sampling_timesteps=T)
+                pred_img = self.model.pred_cond_fast(x_cond, seg_cond=seg_cond, label=label, sampling_timesteps=T)
+            # elif T < self.model.num_timesteps and sample_type.lower() == 'ode':
+            #     pred_img = self.model.pred_cond_fast_ode(x_cond, seg_cond=seg_cond, label=label, sampling_timesteps=T)
+            else:
+                raise ValueError(f'invalid sample type {sample_type}')
+            return pred_img
+        else:
+            if T == self.model.num_timesteps and sample_type.lower() == 'ddpm':
+                pred_img, pred_seg = self.model.pred_cond(x_cond, seg_cond=seg_cond, label=label)
+            elif T < self.model.num_timesteps or sample_type.lower() == 'ddim':
+                pred_img, pred_seg = self.model.pred_cond_fast(x_cond, seg_cond=seg_cond, label=label, sampling_timesteps=T)
+            # elif T < self.model.num_timesteps and sample_type.lower() == 'ode':
+            #     pred_img, pred_seg = self.model.pred_cond_fast_ode(x_cond, seg_cond=seg_cond, label=label, sampling_timesteps=T)
+            return pred_img, pred_seg
 
     def save(self, save_path):
         data = {
@@ -350,11 +386,14 @@ class DDPM_Trainer(object):
         try:
             self.model.load_state_dict(data['model'])
             self.opt.load_state_dict(data['opt'])
+            print('Load successfully. Use strict load method!')
         except:
-            print('Can not load successfully. Use non-strict load method!')
-            self.model.load_state_dict(data['model'], strict=False)
-
-
-
-if __name__ == '__main__':
-    diffusion_model = GaussianDiffusion(net, image_size=424, timesteps=1000, loss_type='l1', objective='pred_x0', activate='none').cuda()
+            try:
+                current_state_dict = self.model.state_dict()
+                filtered_state_dict = {k: v for k, v in data['model'].items() if 'seg_head_conv' not in k}
+                current_state_dict.update(filtered_state_dict)
+                self.model.load_state_dict(current_state_dict)
+                print('Load successfully except seg module!!!')
+            except:
+                print('Can not load successfully. Use non-strict load method!')
+                self.model.load_state_dict(data['model'], strict=False)
