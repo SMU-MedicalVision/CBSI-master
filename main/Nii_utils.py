@@ -4,7 +4,7 @@ import random
 import numpy as np
 import SimpleITK as sitk
 from os.path import join
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, confusion_matrix
 
 
 def NiiDataRead(path, as_type=np.float32):
@@ -117,6 +117,37 @@ def compute_mae(pred, label, mask=None):
     return mae
 
 
+def find_best_threshold(y_true, y_pred):
+    """
+    Finds the optimal threshold for converting predicted probabilities into binary predictions
+    based on a custom F1-like score that balances specificity and recall.
+
+    Args:
+        y_true (array-like): Ground-truth binary labels (0 or 1).
+        y_pred (array-like): Model-predicted probabilities (continuous values between 0 and 1).
+
+    Returns:
+        best_threshold (float): The threshold that maximizes the balanced F1-like score while
+                                keeping the difference between specificity and recall <= 0.1.
+    """
+    best_threshold = 0
+    best_f1 = 0
+    for threshold in np.arange(0.01, 1.0, 0.01):
+        y_pred_binary = (y_pred > threshold).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred_binary).ravel()
+        specificity = tn / (tn + fp)
+        recall = tp / (tp + fn)
+        f1 = 2 * (specificity * recall) / (specificity + recall)
+        if f1 > best_f1 and abs(specificity-recall) <= 0.1:
+            best_f1 = f1
+            best_threshold = threshold
+        if best_threshold == 0:
+            best_threshold = 0.5
+    if best_threshold == 0.5:
+        print('Attention!!!!!!!:best_threshold == 0.5')
+    return best_threshold
+
+
 def setup_seed(seed):
     """
     Set random seed for reproducibility across PyTorch, NumPy, and Python.
@@ -148,7 +179,7 @@ def Save_Parameter(args):
     message = ''
     message += '----------------- Options ---------------\n'
     for k, v in sorted(vars(args).items()):
-        if k=='data_split':
+        if k == 'data_split':
             continue
         message += '{:>25}: {:<30}\n'.format(str(k), str(v))
     message += '----------------- End -------------------\n'
