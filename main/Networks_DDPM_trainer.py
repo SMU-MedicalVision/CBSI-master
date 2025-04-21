@@ -16,16 +16,19 @@ def identity(t, *args, **kwargs):
     return t
 
 
+# Check if variable is not None
 def exists(x):
     return x is not None
 
 
+# Return value if exists, otherwise return default
 def default(val, d):
     if exists(val):
         return val
     return d() if callable(d) else d
 
 
+# Linear beta schedule for diffusion (used in original DDPM)
 def linear_beta_schedule(timesteps):
     scale = 1000 / timesteps
     beta_start = scale * 0.0001
@@ -33,6 +36,7 @@ def linear_beta_schedule(timesteps):
     return torch.linspace(beta_start, beta_end, timesteps, dtype=torch.float64)
 
 
+# Cosine beta schedule from the Improved DDPM paper
 def cosine_beta_schedule(timesteps, s=0.008):
     """
     cosine schedule
@@ -46,12 +50,15 @@ def cosine_beta_schedule(timesteps, s=0.008):
     return torch.clip(betas, 0, 0.999)
 
 
+# Extract specific index values and reshape to match input tensor shape
 def extract(a, t, x_shape):
     b, *_ = t.shape
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
 
+# The core Gaussian Diffusion class
+# Define the forward process and reverse process of the entire Diffusion model
 class GaussianDiffusion(nn.Module):
     def __init__(
             self,
@@ -68,6 +75,11 @@ class GaussianDiffusion(nn.Module):
             ddim_sampling_eta=1.,
             seg_weight=1,
     ):
+        """
+        In the following code,
+            'p_' refers to the reverse process
+            'q_' refers to the forward process.
+        """
         super().__init__()
         assert not (type(self) == GaussianDiffusion and model.channels != model.out_dim)
         assert not model.learned_sinusoidal_cond
@@ -94,31 +106,36 @@ class GaussianDiffusion(nn.Module):
         self.num_timesteps = int(timesteps)
         self.loss_type = loss_type
         # sampling related parameters
-        self.sampling_timesteps = default(sampling_timesteps,
-                                          timesteps)  # default num sampling timesteps to number of timesteps at training
+        self.sampling_timesteps = default(sampling_timesteps, timesteps)  # default num sampling timesteps to number of timesteps at training
         assert self.sampling_timesteps <= timesteps
         self.is_ddim_sampling = self.sampling_timesteps < timesteps
         self.ddim_sampling_eta = ddim_sampling_eta
+
         # helper function to register buffer from float64 to float32
         register_buffer = lambda name, val: self.register_buffer(name, val.to(torch.float32))
         register_buffer('betas', betas)
         register_buffer('alphas_cumprod', alphas_cumprod)
         register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
+
         # calculations for diffusion q(x_t | x_{t-1}) and others
         register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
         register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
         register_buffer('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod))
         register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod))
         register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))
+
         # calculations for posterior q(x_{t-1} | x_t, x_0)
         posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+
         # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
         register_buffer('posterior_variance', posterior_variance)
+
         # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
         register_buffer('posterior_log_variance_clipped', torch.log(posterior_variance.clamp(min=1e-20)))
         register_buffer('posterior_mean_coef1', betas * torch.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod))
         register_buffer('posterior_mean_coef2', (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod))
-        # calculate p2 reweighting
+
+        # P2 reweighting loss
         register_buffer('p2_loss_weight',
                         (p2_loss_weight_k + alphas_cumprod / (1 - alphas_cumprod)) ** -p2_loss_weight_gamma)
 
@@ -214,6 +231,9 @@ class GaussianDiffusion(nn.Module):
         return img
 
     def pred_cond(self, cond, seg_cond=None, label=None):
+        """
+        Define reverse process.
+        """
         device = self.betas.device
         shape = (cond.size(0), self.model.channels, self.image_size, self.image_size)
         img = torch.randn(shape, device=device)
@@ -223,6 +243,9 @@ class GaussianDiffusion(nn.Module):
         return img
 
     def pred_cond_fast(self, cond, seg_cond=None, label=None, sampling_timesteps=250, clip_denoised=True):
+        """
+        Define reverse process. Use DDIM's sampling method to reduce the number of inference time steps (1000 to 100)
+        """
         device = self.betas.device
         batch = cond.size(0)
         shape = (cond.size(0), self.model.channels, self.image_size, self.image_size)
@@ -264,6 +287,9 @@ class GaussianDiffusion(nn.Module):
         return sample_fn((batch_size, channels, image_size, image_size))
 
     def q_sample(self, x_start, t, noise=None):
+        """
+        Define forward process
+        """
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         return (
@@ -293,7 +319,7 @@ class GaussianDiffusion(nn.Module):
             model_out = torch.tanh(model_out)
         if self.objective == 'pred_noise':
             target = noise
-        elif self.objective == 'pred_x0':
+        elif self.objective == 'pred_x0':  # In CBSI, we chose to predict x0, which can converge faster
             target = x_start
         else:
             raise ValueError(f'unknown objective {self.objective}')
@@ -313,18 +339,18 @@ class GaussianDiffusion(nn.Module):
             loss = loss.mean()
 
         if seg is not None:
-            # res_map = CE_mask(target, model_out)  # CE_mask 还没改好
-            # loss_seg = self.loss_fn(seg_out, res_map, reduction='mean')  # 当前项计算的target mask
             lossfunction_seg = DiceLoss()
             loss_seg = lossfunction_seg(seg_out, seg)
             loss = loss + loss_seg * self.seg_weight
         return loss
+
 
     def forward(self, img, cond, seg=None, seg_cond=None, label=None, *args, **kwargs):
         b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size
         assert h == img_size and w == img_size, f'height and width of image must be {img_size} not {h}&{w}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
         return self.p_losses(img, t, cond=cond, seg=seg, seg_cond=seg_cond, label=label, *args, **kwargs)
+
 
 
 class DDPM_Trainer(object):
@@ -337,42 +363,81 @@ class DDPM_Trainer(object):
     ):
         super().__init__()
         self.model = diffusion_model
+
+        # Check if the model supports multitask outputs (e.g., image + segmentation)
         self.multitask = self.model.multitask
+
+        # Training hyperparameters
         self.batch_size = train_batch_size
         self.image_size = diffusion_model.image_size
+
+        # Optimizer initialization using Adam
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr, betas=adam_betas)
 
     def calculate_loss(self, x, x_cond, label=None):
+        """
+        Compute the training loss for standard (single-task) conditional diffusion.
+        Args:
+            x: Ground truth images.
+            x_cond: Conditional input (e.g., NCCT).
+            label: Optional class label for conditional generation.
+        Returns:
+            Scalar loss tensor.
+        """
         loss = self.model(x, x_cond, label=label)
         return loss
 
     def calculate_loss_multitask(self, x, x_cond, seg, seg_cond, label=None):
+        """
+        Compute the training loss for multitask diffusion (e.g., image + segmentation).
+        Args:
+            x: Ground truth image.
+            x_cond: Conditional input image.
+            seg: Ground truth segmentation.
+            seg_cond: Conditional segmentation input (optional).
+            label: Optional class label for conditional generation.
+        Returns:
+            Scalar multitask loss tensor.
+        """
         loss = self.model(x, x_cond, seg, seg_cond, label=label)
         return loss
 
 
     def pred(self, x_cond, T, seg_cond=None, label=None, sample_type='ddim'):
+        """
+        Generate samples from the trained model using either DDPM or DDIM.
+        Args:
+            x_cond: Conditional input image.
+            T: Number of diffusion steps (T < total steps for DDIM, T == total for DDPM).
+            seg_cond: Optional conditional segmentation input.
+            label: Optional class label.
+            sample_type: 'ddpm' or 'ddim' to choose sampling strategy.
+        Returns:
+            Predicted image (and segmentation if multitask).
+        """
         if not self.multitask:
+            # Single-task generation
             if T == self.model.num_timesteps and sample_type.lower() == 'ddpm':
                 pred_img = self.model.pred_cond(x_cond, seg_cond=seg_cond, label=label)
             elif T < self.model.num_timesteps or sample_type.lower() == 'ddim':
-                # pred_img = self.model.pred_cond_fast(x_cond, sampling_timesteps=T)
                 pred_img = self.model.pred_cond_fast(x_cond, seg_cond=seg_cond, label=label, sampling_timesteps=T)
-            # elif T < self.model.num_timesteps and sample_type.lower() == 'ode':
-            #     pred_img = self.model.pred_cond_fast_ode(x_cond, seg_cond=seg_cond, label=label, sampling_timesteps=T)
             else:
                 raise ValueError(f'invalid sample type {sample_type}')
             return pred_img
         else:
+            # Multitask generation
             if T == self.model.num_timesteps and sample_type.lower() == 'ddpm':
                 pred_img, pred_seg = self.model.pred_cond(x_cond, seg_cond=seg_cond, label=label)
             elif T < self.model.num_timesteps or sample_type.lower() == 'ddim':
                 pred_img, pred_seg = self.model.pred_cond_fast(x_cond, seg_cond=seg_cond, label=label, sampling_timesteps=T)
-            # elif T < self.model.num_timesteps and sample_type.lower() == 'ode':
-            #     pred_img, pred_seg = self.model.pred_cond_fast_ode(x_cond, seg_cond=seg_cond, label=label, sampling_timesteps=T)
             return pred_img, pred_seg
 
     def save(self, save_path):
+        """
+        Save model and optimizer state to a file.
+        Args:
+            save_path: Path to save the checkpoint file.
+        """
         data = {
             'model': self.model.state_dict(),
             'opt': self.opt.state_dict(),
@@ -380,20 +445,26 @@ class DDPM_Trainer(object):
         torch.save(data, save_path)
 
     def load(self, model_path):
+        """
+        Load model and optimizer state from a checkpoint file.
+        Automatically handles missing segmentation modules for backward compatibility.
+        Args:
+            model_path: Path to the checkpoint file.
+        """
         data = torch.load(model_path)
-        # checkpoint = torch.load(model_path)
-        # self.model.load_state_dict({k.replace('module.', 'model.'): v for k, v in checkpoint.items()})
         try:
             self.model.load_state_dict(data['model'])
             self.opt.load_state_dict(data['opt'])
             print('Load successfully. Use strict load method!')
         except:
             try:
+                # Attempt to load model excluding segmentation head (if incompatible)
                 current_state_dict = self.model.state_dict()
                 filtered_state_dict = {k: v for k, v in data['model'].items() if 'seg_head_conv' not in k}
                 current_state_dict.update(filtered_state_dict)
                 self.model.load_state_dict(current_state_dict)
                 print('Load successfully except seg module!!!')
             except:
+                # Fall back to non-strict load
                 print('Can not load successfully. Use non-strict load method!')
                 self.model.load_state_dict(data['model'], strict=False)
