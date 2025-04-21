@@ -7,11 +7,23 @@ from os.path import join
 from sklearn.metrics import f1_score
 
 
-
 def NiiDataRead(path, as_type=np.float32):
+    """
+    Read a NIfTI medical image and return its data, spacing, origin, and direction.
+
+    Args:
+        path (str): Path to the NIfTI file.
+        as_type (np.dtype): Desired data type of the returned image array.
+
+    Returns:
+        volumn (ndarray): 3D image data in [z, y, x] order.
+        spacing_ (ndarray): Voxel spacing in [z, y, x] order.
+        origin (tuple): Image origin in physical space.
+        direction (tuple): Image orientation (direction cosine matrix).
+    """
     nii = sitk.ReadImage(path)
-    spacing = nii.GetSpacing()  # [x,y,z]
-    volumn = sitk.GetArrayFromImage(nii)  # [z,y,x]
+    spacing = nii.GetSpacing()  # Original spacing is [x, y, z]
+    volumn = sitk.GetArrayFromImage(nii)  # Converts to numpy array in [z, y, x]
     origin = nii.GetOrigin()
     direction = nii.GetDirection()
 
@@ -19,13 +31,27 @@ def NiiDataRead(path, as_type=np.float32):
     spacing_y = spacing[1]
     spacing_z = spacing[2]
 
+    # Reorder spacing to match numpy array order
     spacing_ = np.array([spacing_z, spacing_y, spacing_x])
     return volumn.astype(as_type), spacing_.astype(np.float32), origin, direction
 
 
 def NiiDataWrite(save_path, volumn, spacing, origin, direction, as_type=np.float32):
+    """
+    Save a 3D numpy array as a NIfTI file with spatial information.
+
+    Args:
+        save_path (str): Destination path to save the NIfTI file.
+        volumn (ndarray): 3D image data [z, y, x].
+        spacing (ndarray): Spacing in [z, y, x] order.
+        origin (tuple): Image origin.
+        direction (tuple): Image orientation.
+        as_type (np.dtype): Data type to save as.
+    """
     spacing = spacing.astype(np.float64)
     raw = sitk.GetImageFromArray(volumn[:, :, :].astype(as_type))
+
+    # Convert spacing back to [x, y, z] for SimpleITK
     spacing_ = (spacing[2], spacing[1], spacing[0])
     raw.SetSpacing(spacing_)
     raw.SetOrigin(origin)
@@ -33,22 +59,34 @@ def NiiDataWrite(save_path, volumn, spacing, origin, direction, as_type=np.float
     sitk.WriteImage(raw, save_path)
 
 
-def harmonize_mr(X, min=0, max=255):#相对
+def harmonize_mr(X, min=0, max=255):
+    """
+    Clip MR image values to [min, max] and normalize them to [-1, 1].
+
+    Args:
+        X (ndarray): Input image.
+        min (float): Minimum intensity to clip.
+        max (float): Maximum intensity to clip.
+
+    Returns:
+        Normalized image with values in [-1, 1].
+    """
     X[X > max] = max
     X[X < min] = min
     X = X / abs(max-min) * 2 - 1
     return X
 
 
-
 def dice_coefficient(prediction, target):
     """
-    计算 Dice 系数
+    Compute Dice coefficient (F1 score) between binary predictions and targets.
+
     Args:
-        prediction: predicted binary segmentation result (numpy array or tensor)
-        target: actual binary segmentation result (numpy array or tensor)
+        prediction (ndarray or tensor): Binary predicted mask.
+        target (ndarray or tensor): Binary ground-truth mask.
+
     Returns:
-        Dice coefficient
+        float: Dice coefficient (ranges from 0 to 1).
     """
     # Convert the predicted glioma mask and the true glioma mask into a one-dimensional array
     prediction = prediction.ravel()
@@ -60,6 +98,17 @@ def dice_coefficient(prediction, target):
 
 
 def compute_mae(pred, label, mask=None):
+    """
+    Compute Mean Absolute Error (MAE) between predicted and ground-truth images.
+
+    Args:
+        pred (ndarray): Predicted values.
+        label (ndarray): Ground-truth values.
+        mask (ndarray, optional): Binary mask to compute MAE only on specific regions.
+
+    Returns:
+        float: Mean absolute error.
+    """
     mae = np.abs(pred - label)
     if mask.any():
         mae = np.mean(mae[mask == 1])
@@ -69,12 +118,20 @@ def compute_mae(pred, label, mask=None):
 
 
 def setup_seed(seed):
+    """
+    Set random seed for reproducibility across PyTorch, NumPy, and Python.
+
+    Args:
+        seed (int): The seed to set.
+    """
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
     # The operation of cuDNN is deterministic, and for neural network layers with the same inputs then the same outputs
+
+    # Ensures reproducibility in cuDNN (NVIDIA's backend)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False  # cuDNN's auto-tuner
     torch.backends.cudnn.enabled = False
@@ -82,6 +139,12 @@ def setup_seed(seed):
 
 
 def Save_Parameter(args):
+    """
+    Save training parameters to a text and JSON file for logging and reproducibility.
+
+    Args:
+        args (argparse.Namespace): Contains all argument key-value pairs.
+    """
     message = ''
     message += '----------------- Options ---------------\n'
     for k, v in sorted(vars(args).items()):
@@ -90,97 +153,12 @@ def Save_Parameter(args):
         message += '{:>25}: {:<30}\n'.format(str(k), str(v))
     message += '----------------- End -------------------\n'
     print(message)
-    # message += str(args.data_split)
+
+    # Save as plain text
     with open(join(args.save_dir, 'train_parameter.txt'), 'wt') as f:
         f.write(message)
         f.write('\n')
 
+    # Save as structured JSON
     with open(join(args.save_dir, 'train_parameter.json'), 'w') as f:
         json.dump(vars(args), f, indent=4)
-
-
-# def circle(size=31, r=15, x_offset=0, y_offset=0):
-#     x0 = y0 = size // 2
-#     x0 += x_offset
-#     y0 += y_offset
-#     y, x = np.ogrid[:size, :size]
-#     y = y[::-1]
-#     return ((x - x0)**2 + (y-y0)**2) <= r**2
-#
-# def img_dilate_3D(volumn, kernel, center_coo):
-#     kernel_w = kernel.shape[0]
-#     kernel_h = kernel.shape[1]
-#     if kernel[center_coo[0], center_coo[1]] == 0:
-#         raise ValueError("指定原点不在结构元素内！")
-#     dilate_img = np.zeros(shape=volumn.shape)
-#     z, _, _ = np.where(volumn > 0)
-#     zi = np.min(z)
-#     za = np.max(z)
-#     for slice in range(zi, za+1):
-#         for i in range(center_coo[0], volumn.shape[1] - kernel_w + center_coo[0] + 1):
-#             for j in range(center_coo[1], volumn.shape[2] - kernel_h + center_coo[1] + 1):
-#                 a = volumn[slice, i - center_coo[0]:i - center_coo[0] + kernel_w,
-#                     j - center_coo[1]:j - center_coo[1] + kernel_h]
-#                 dilate_img[slice, i, j] = np.max(a * kernel)  # 若“有重合”，则点乘后最大值为0
-#     if zi != 0:
-#         dilate_img[zi-1] = dilate_img[zi]
-#     if za != volumn.shape[0]-1:
-#         dilate_img[za+1] = dilate_img[za]
-#     return dilate_img
-#
-#
-# def N4BiasFieldCorrection(volumn_path, save_path):  # ,mask_path,save_path):
-#     img = sitk.ReadImage(volumn_path)
-#     # mask,_ = sitk.ReadImage(mask_path)
-#     mask = sitk.OtsuThreshold(img, 0, 1, 200)
-#     inputVolumn = sitk.Cast(img, sitk.sitkFloat32)
-#     corrector = sitk.N4BiasFieldCorrectionImageFilter()
-#     sitk.WriteImage(corrector.Execute(inputVolumn, mask), save_path)
-#
-#
-# def dcm2nii(DCM_DIR, OUT_PATH):
-#     """
-#     :param DCM_DIR: Input folder set to be converted.
-#     :param OUT_PATH: Output file suffixed with .nii.gz . *(Relative path)
-#     :return: No retuen.
-#     """
-#     fuse_list = []
-#     for dicom_file in os.listdir(DCM_DIR):
-#         dicom = pydicom.dcmread(osp.join(DCM_DIR, dicom_file))
-#         fuse_list.append([dicom.pixel_array, float(dicom.SliceLocation)])
-#     # 按照每层位置(Z轴方向)由小到大排序
-#     fuse_list.sort(key=lambda x: x[1])
-#     volume_list = [i[0] for i in fuse_list]
-#     volume = np.array(volume_list).astype(np.float32) - 1024
-#     [spacing_x, spacing_y] = dicom.PixelSpacing
-#     spacing = np.array([dicom.SliceThickness, spacing_x, spacing_y])
-#     NiiDataWrite(OUT_PATH, volume, spacing)
-#
-#
-# def nii2mat(in_path, out_dir=None):
-#     volume, spacing = NiiDataRead(in_path)
-#     if out_dir is None:  # save in same dir
-#         out_path = in_path.split('.')[0] + '.mat'
-#     else:  # save in specific dir
-#         out_path = osp.join(out_dir, osp.split(in_path)[-1].split('.')[0] + '.mat')
-#     scipy.io.savemat(out_path, {'volume': volume, 'spacing': spacing})
-#     print(f'Saved at {out_path}')
-#
-#
-# def mat2nii(in_path, out_dir=None):
-#     mat_contents = scipy.io.loadmat(in_path)
-#     if out_dir is None:  # save in same dir
-#         out_path = in_path.split('.')[0] + '.nii.gz'
-#     else:  # save in specific dir
-#         out_path = osp.join(out_dir, osp.split(in_path)[-1].split('.')[0] + '.nii.gz')
-#     NiiDataWrite(out_path, mat_contents['output'], mat_contents['spacing'][0])
-#     print(f'Saved at {out_path}')
-#
-#
-# def compute_mae(pred, label, mask=None):
-#     mae = np.abs(pred - label)
-#     if mask.any():
-#         mae = np.mean(mae[mask == 1])
-#     else:
-#         mae = np.mean(mae)
-#     return mae
