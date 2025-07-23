@@ -1,8 +1,8 @@
 1. 'pip download torch==2.0.0+cu118 torchvision==0.15.1+cu118' takes a relatively long time.
-    If the installation fails, you can download A and B for manual installation
+    If the installation fails, you can download from https://download.pytorch.org/whl/torch_stable.html for manual installation.
 
 2. AttributeError: module 'PIL.Image' has no attribute 'ANTIALIAS' python-BaseException
--This is because in Pillow 10.0.0+, Image.ANTIALIAS was completely removed and the Pillow version (compatible with tensorboardX) should be reduced.
+-This is because in Pillow 10.0.0+, Image.ANTIALIAS was completely removed, and the Pillow version (compatible with tensorboardX) should be reduced.
     'pip install "Pillow<10.0"' or 'pip install Pillow==9.5.0'
 
 3. UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True), rather than torch.tensor(sourceTensor).
@@ -11,3 +11,12 @@
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning, message=".*To copy construct from a tensor.*")
     '''
+
+4. Command: tensorboard --logdir ./main/trained_models/  # To visualize the training process
+   UserWarning: Port 6006 is in use by another program. Either identify and stop that program, or start the server with a different port.
+   Revise: tensorboard --logdir ./main/trained_models/ --port=*new_port*
+
+# ========== Training Error ==========
+5. torch.cuda.OutOfMemoryError: CCUDA out of memory
+    Reduce opt.bs and opt.val_bs
+    'train_CBSI_gen.py --model_name' sets the model name to a simpler one, such as 'simple_unet_Improved_32_class'
